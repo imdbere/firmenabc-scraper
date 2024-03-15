@@ -2,41 +2,59 @@ import { asyncParallelForEach } from "async-parallel-foreach";
 import axios, { AxiosError } from "axios";
 import { writeFileSync } from "fs";
 import { Node, NodeType, parse as parseHtml } from 'node-html-parser';
-import { parse as parseVcard } from "vcard4";
 var vCard = require('vcard-parser');
 
-async function getCompanies(search: string, paginationNr: number) {
-    var url = `https://www.firmenabc.at/result.aspx?what=${encodeURIComponent(search)}&where=&exact=false&inTitleOnly=false&l=&si=${paginationNr}&iid=&sid=-1&did=&cc=`;
-
+async function fetchCatchRedirects(url: string) {
     try {
         var res = await axios.get(url, {maxRedirects: 0});
-        var html = parseHtml(res.data);
-
-        const content = html.querySelectorAll('.companies .result .result-content');
-
-        const companies = content.map(c => {
-            var link = c.querySelector('a')?.attrs['href']!;
-            var title = c.querySelector('h2')?.innerText!;
-
-            return {link, title};
-        });
-
-        console.log(`Fetched results for ${search}, pag: ${paginationNr}`);
-
-        return companies;
+        return {data: res.data, redirect: null};
     }
     catch (ex: any) {
-        const status = ex.response.status;
-        if (status == 301) return [];
+        if (ex instanceof AxiosError) {
+            if (ex.response?.status == 301) {
+                var location = ex.response?.headers["location"];
+                return {data: null, redirect: location}
+            }
+        }
 
         throw ex;
     }
 }
 
+async function getCompanies(url: string) {
+    var res = await fetchCatchRedirects(url);
+    console.log(url);
+    console.log(res.redirect);
+    if (!res.data) return [];
+
+    var html = parseHtml(res.data);
+    const content = html.querySelectorAll('.companies .result .result-content');
+
+    const companies = content.map(c => {
+        var link = c.querySelector('a')?.attrs['href']!;
+        var title = c.querySelector('h2')?.innerText!;
+
+        return {link, title};
+    });
+
+    return companies;
+}
+
 async function getCompaniesPaginated(search: string, maxPag: number) {
     var links: {title: string, link: string}[] = [];
-    for(var i = 0; i<maxPag; i+=50) {
-        var companies = await getCompanies(search, i);    
+
+    var getUrl = (search: string, paginationNr: number) => `https://www.firmenabc.at/result.aspx?what=${encodeURIComponent(search)}&where=&exact=false&inTitleOnly=false&l=&si=${paginationNr * 50}&iid=&sid=-1&did=&cc=`;
+
+    var {data, redirect} = await fetchCatchRedirects(getUrl(search, 0));
+    if (redirect.includes('suchbegriff')) {
+        console.log('Caught redirect, using different url');
+        getUrl = (search: string, paginationNr: number) => paginationNr == 0 ? redirect : redirect + "/" + (paginationNr + 1);
+    }
+
+    for(var i = 0; i<maxPag; i++) {
+        var url = getUrl(search, i);
+        var companies = await getCompanies(url);   
+        console.log(`Fetched results for ${search}, pag: ${i}`); 
         if (companies.length == 0)
             break;
 
@@ -44,7 +62,6 @@ async function getCompaniesPaginated(search: string, maxPag: number) {
     }
 
     return links;
-    //console.log(links);
 }
 
 interface Person {
@@ -137,9 +154,9 @@ async function scrapeSearchWord(search: string) {
     console.log('Now scraping word ' + search);
 
     var companies = await getCompaniesPaginated(search, 10000);
-    var filteredCompanies = companies.filter(c => 
+    var filteredCompanies = companies/*.filter(c => 
         (c.title.includes("GmbH") || c.title.includes("m.b.H.")) && !c.title.includes('KG') && !c.title.includes('OG')
-    );
+    );*/
 
     var details : any = [];
     await asyncParallelForEach(filteredCompanies, 20, async (company: any, i) => {
@@ -149,26 +166,26 @@ async function scrapeSearchWord(search: string) {
         if (!info)
             return;
             
-        if (!info.email && !info.tel)
+        if (!info.email/* && !info.tel*/)
             return;
 
-        if (info.shareholders.some(s => !s.privateIndividual)) 
+        /*if (info.shareholders.some(s => !s.privateIndividual)) 
             return;
 
         if (!info.shareholders.some(s => s.shares > 75))
-            return;
+            return;*/
 
         details.push(info);
     })
 
-    var fileName = search.toLowerCase().replace(' ', '_') + '.json';
+    var fileName = search.toLowerCase().replace(' ', '_').replace('/', '_') + '.json';
     writeFileSync('out/' + fileName, JSON.stringify(details));
 }
 
 async function main() {
-    await scrapeSearchWord('Vermögensverwaltung');
-    await scrapeSearchWord('Ventures');
-    await scrapeSearchWord('Capital');
+    await scrapeSearchWord('Finanzberatung');
+    //await scrapeSearchWord('Ventures');
+    //await scrapeSearchWord('Capital');
     //getCompanyInfo('https://www.firmenabc.at/kurt-stromberger-handels-u-vermoegensverwaltungs-ges-m-b-h_KNSZ');
     //getCompanyInfo('https://www.firmenabc.at/wien-laurenzerberg-vermoegensverwaltung-gmbh_MjbK');
     
